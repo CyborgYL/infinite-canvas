@@ -120,9 +120,12 @@ async function createSeedanceTask(config: AiConfig, model: string, prompt: strin
     if (audioReferences.length && !references.length && !videoReferences.length) {
         throw new Error("Seedance 参考音频不能单独使用，请同时添加参考图或参考视频");
     }
+    if (isSeedance15Model(model) && (references.length > 1 || videoReferences.length || audioReferences.length)) {
+        throw new Error("doubao-seedance-1.5-pro 仅支持单张首帧图生视频，请切换到 doubao-seedance-2.0 / doubao-seedance-2.0-fast，或只保留一张参考图");
+    }
     assertSeedanceVideoReferences(videoReferences);
     assertSeedanceAudioReferences(audioReferences);
-    const content = await buildSeedanceContent(config, prompt, references, videoReferences, audioReferences);
+    const content = await buildSeedanceContent(model, prompt, references, videoReferences, audioReferences);
     if (!content.length) throw new Error("请输入视频提示词，或连接参考图片/视频/音频");
     const payload = {
         model,
@@ -186,30 +189,34 @@ function seedanceApiUrl(config: AiConfig, taskId?: string) {
     return buildApiUrl(config.baseUrl, `/contents/generations/tasks${taskId ? `/${encodeURIComponent(taskId)}` : ""}`);
 }
 
-async function buildSeedanceContent(config: AiConfig, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
+async function buildSeedanceContent(model: string, prompt: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
     const content: Array<Record<string, unknown>> = [];
     const text = buildSeedancePromptText(prompt, references, videoReferences, audioReferences);
     if (text) content.push({ type: "text", text });
+    const imageRole = seedanceImageRole(model, references, videoReferences, audioReferences);
     for (const image of references.slice(0, SEEDANCE_REFERENCE_LIMITS.images)) {
-        content.push({ type: "image_url", image_url: { url: await resolveSeedanceImageUrl(config, image) }, role: "reference_image" });
+        content.push({ type: "image_url", image_url: { url: await resolveSeedanceImageUrl(image), role: imageRole } });
     }
     for (const video of videoReferences.slice(0, SEEDANCE_REFERENCE_LIMITS.videos)) {
-        content.push({ type: "video_url", video_url: { url: await resolveSeedanceVideoUrl(video) }, role: "reference_video" });
+        content.push({ type: "video_url", video_url: { url: await resolveSeedanceVideoUrl(video), role: "reference_video" } });
     }
     for (const audio of audioReferences.slice(0, SEEDANCE_REFERENCE_LIMITS.audios)) {
-        content.push({ type: "audio_url", audio_url: { url: await resolveSeedanceAudioUrl(audio) }, role: "reference_audio" });
+        content.push({ type: "audio_url", audio_url: { url: await resolveSeedanceAudioUrl(audio), role: "reference_audio" } });
     }
     return content;
 }
 
-async function resolveSeedanceImageUrl(config: AiConfig, image: ReferenceImage) {
+function seedanceImageRole(model: string, references: ReferenceImage[], videoReferences: ReferenceVideo[], audioReferences: ReferenceAudio[]) {
+    if (references.length === 1 && !videoReferences.length && !audioReferences.length) return "first_frame";
+    if (isSeedance15Model(model)) return "first_frame";
+    return "reference_image";
+}
+
+async function resolveSeedanceImageUrl(image: ReferenceImage) {
     const directUrl = image.url || image.dataUrl;
     if (isPublicMediaUrl(directUrl) || directUrl.startsWith("asset://")) return directUrl;
     const dataUrl = await imageToDataUrl(image);
     if (!dataUrl) throw new Error("参考图读取失败，请换一张图片或重新上传");
-    if (config.channelMode === "remote") {
-        return uploadReferenceMedia(dataUrlToFile({ ...image, dataUrl }));
-    }
     return dataUrl;
 }
 
@@ -277,6 +284,11 @@ function normalizeVideoResolution(value: string) {
     if (value === "auto" || value === "high" || value === "medium") return "720p";
     const resolution = value.replace(/p$/i, "") || "720";
     return `${resolution}p`;
+}
+
+function isSeedance15Model(model: string) {
+    const value = model.toLowerCase();
+    return value.includes("seedance-1.5") || value.includes("seedance-1-5");
 }
 
 function unwrapVideoResponse(payload: ApiVideoResponse) {
